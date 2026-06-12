@@ -1,0 +1,11 @@
+.venv/
+.env
+__pycache__/
+*.egg-info/
+work*/
+work_impossible/
+.pytest_cache/
+pdca.egg-info/
+.pytest_cache/
+CLAUDE.md/
+.claude/
