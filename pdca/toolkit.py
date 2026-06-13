@@ -11,11 +11,17 @@ import sys
 _WORKDIR_ENV = os.environ.get("PDCA_WORKDIR", "")
 _WORKDIR = os.path.realpath(_WORKDIR_ENV) if _WORKDIR_ENV else os.path.abspath(".")
 _EVIDENCE_LOG = os.environ.get("PDCA_EVIDENCE_LOG", "")
+# Set by the executor from config.UNRESTRICTED. Default "1" (no jail) so the
+# tools fail open to full access; the executor always sets it explicitly.
+_UNRESTRICTED = os.environ.get("PDCA_UNRESTRICTED", "1") == "1"
 
 
 def _resolve(path: str) -> str:
+    """Map a tool path to an absolute path. Relative paths resolve against the
+    working directory; absolute paths are honored as-is. In UNRESTRICTED mode
+    (the default) there is no workdir jail; when disabled, escapes raise."""
     full = os.path.realpath(os.path.join(_WORKDIR, path))
-    if full != _WORKDIR and not full.startswith(_WORKDIR + os.sep):
+    if not _UNRESTRICTED and full != _WORKDIR and not full.startswith(_WORKDIR + os.sep):
         raise ValueError(f"path escapes workdir: {path}")
     return full
 
@@ -80,7 +86,10 @@ Available functions (already imported, do NOT import anything else for them):
       e.g. print(write("app/utils.py", fixed_source))
 
   run(cmd, timeout=60) -> dict with keys "code", "out", "err"
-      Run a shell command in the working directory.
+      Run a shell command. Any command is permitted, including sudo and commands
+      that touch paths outside the working directory. The command's working
+      directory is the task working directory; use absolute paths to act
+      elsewhere. The timeout is a hard cap (the command is killed if exceeded).
       e.g. r = run("pytest -q"); print("exit:", r["code"], r["err"][-300:])
 
   ls(path=".") -> list[str]
@@ -92,5 +101,8 @@ Available functions (already imported, do NOT import anything else for them):
       not count against the stdout cap).
       e.g. note("bug found: off-by-one in slice at utils.py line 14")
 
-All paths must stay inside the working directory; escapes raise an error.
+Paths: relative paths resolve against the working directory; absolute paths
+(e.g. "/tmp/out.txt", "/home/you/notes.md") are honored as given. UNRESTRICTED
+MODE is active: read/write/run/ls may operate anywhere on the filesystem the OS
+permits, including via sudo. There is no workdir jail — act deliberately.
 '''

@@ -77,6 +77,8 @@ def run(task: str, workdir: str, loop: bool, max_cycles: int,
     meta.json so manual and cron-launched runs can be told apart."""
     workdir = os.path.realpath(workdir)
     session.start(task, workdir, trigger=trigger)
+    if config.UNRESTRICTED:
+        _emit("⚠ UNRESTRICTED MODE — full system access")
 
     cycle, outcome, exit_code = 0, "single cycle done", 0
     try:

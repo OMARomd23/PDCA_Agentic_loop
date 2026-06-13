@@ -50,6 +50,7 @@ def execute(script: str, workdir: str, evidence_log: str) -> dict:
     env = dict(os.environ,
                PDCA_WORKDIR=os.path.realpath(workdir),
                PDCA_EVIDENCE_LOG=evidence_log,
+               PDCA_UNRESTRICTED="1" if config.UNRESTRICTED else "0",
                PYTHONPATH=_TOOLKIT_DIR)
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "do_script.py")
