@@ -4,18 +4,7 @@ An autonomous coding agent that runs a **Plan → Do → Check → Act** loop on
 
 Give it a task in plain English. It writes code, runs tests, reads failures, fixes them, and keeps going until the task passes every objective gate.
 
-> ### ⚠ Unrestricted mode
-> This build runs with **`UNRESTRICTED = True`** (`pdca/config.py`): the Do/Probe
-> scripts have **no filesystem jail and no command allowlist** — they read, write,
-> and run anywhere the OS permits, including `sudo`. Every run prints
-> `⚠ UNRESTRICTED MODE — full system access` at startup. This is intended for a
-> single operator on their own machine. Set `UNRESTRICTED = False` to re-enable the
-> workdir jail (relative paths confined to the workdir, escapes raise). The
-> operational rails are independent of this flag and always on: per-command
-> timeout, stdout capping, and the harness stopping conditions.
-
-Every invocation also writes a full **session log** under `~/.pdca_agent/sessions/`
-(prompts, completions, scripts, outcome) — see [Session logs](#session-logs).
+The toolkit works across your whole machine: Do/Probe scripts can read, write, and run commands [anywhere](#working-anywhere-on-the-machine), not just inside the working directory. Every run is recorded to a [session log](#session-logs), and tasks can be [scheduled](#scheduling) to run on a recurring basis.
 
 ---
 
@@ -39,7 +28,7 @@ flowchart LR
 Reasons about the current state of the working directory and the previous cycle's failures. Produces a JSON plan: analysis, strategy, concrete steps, success criteria, and shell verify commands.
 
 **DO** (`deepseek-v4-flash`)
-Receives the plan and writes a single Python script. The script runs on your machine in a subprocess using a sandboxed toolkit: `read()`, `write()`, `run()`, `ls()`, `note()`. Only its capped stdout (6000 chars) returns to the model — the script can produce arbitrary side effects (create files, run tests) but the model only sees what it prints. If the script crashes, a cheap in-cycle repair attempt runs before counting the cycle as failed.
+Receives the plan and writes a single Python script. The script runs on your machine in a subprocess using a toolkit: `read()`, `write()`, `run()`, `ls()`, `note()`. Only its capped stdout (6000 chars) returns to the model — the script can produce arbitrary side effects (create files, run tests) but the model only sees what it prints. If the script crashes, a cheap in-cycle repair attempt runs before counting the cycle as failed.
 
 **CHECK** (three layers, in order of authority)
 1. **Objective gate**: the plan's `verify_commands` run as plain shell commands. Exit code is authoritative — a command that exits non-zero means the criterion is unmet, period.
@@ -222,6 +211,28 @@ Act: ADJUST — remove unused import pytest from test_intervals.py
 
 ---
 
+## Working anywhere on the machine
+
+The toolkit is not limited to the working directory. In `read()`, `write()`, `run()`, and `ls()`:
+
+- **relative paths** resolve against `--workdir` (e.g. `write("app.py", …)`);
+- **absolute paths** are used as given (e.g. `write("/tmp/out.txt", …)`, `read("/etc/hosts")`);
+- `run()` executes any shell command.
+
+So a task can create or edit files outside the workdir directly. Each run prints a one-line `UNRESTRICTED MODE` banner at startup so you can see it is active.
+
+**Example — write a file outside the workdir:**
+
+```bash
+PATH=$PWD/.venv/bin:$PATH pdca \
+  "Create the file /tmp/pdca_test.txt containing today's date." \
+  --workdir ./work_scratch --loop
+```
+
+To keep the toolkit confined to the working directory instead (relative paths only), set `UNRESTRICTED = False` in `pdca/config.py`.
+
+---
+
 ## Session logs
 
 Every invocation (manual **or** scheduled) opens one session directory and routes
@@ -241,6 +252,15 @@ Each `raw/` file holds `{prompt:{system,user}, completion, model, tokens, latenc
 verbatim for PLAN/DO/CHECK/PROBE/ACT and every retry — nothing the model said is
 discarded. `meta.json`'s `trigger` is `"manual"` for a direct run or
 `"scheduled:<name>"` for a cron-launched one, so the two are easy to tell apart.
+
+**Inspect the most recent run:**
+
+```bash
+SESS=$(ls -dt ~/.pdca_agent/sessions/*/ | head -1)
+cat "$SESS/meta.json"          # outcome, tokens, cycles, trigger
+cat "$SESS/session.log"        # full timeline
+ls  "$SESS/raw"                # every prompt + completion, one file per call
+```
 
 ---
 
