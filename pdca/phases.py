@@ -14,7 +14,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from pdca import config, executor, llm
+from pdca import config, executor, llm, session
 from pdca.toolkit import TOOLKIT_DOCS
 
 
@@ -130,6 +130,7 @@ previous approach is NOT working. Requirements for this plan:
 
 def plan(task: str, state_digest: str, last_check: str, lessons: str,
          rethink_count: int = 0) -> Plan:
+    session.set_phase("PLAN")
     user = f"TASK:\n{task}\n\nSTATE (last cycles digest):\n{state_digest or '(first cycle)'}"
     if lessons:
         user += f"\n\nLESSONS / FAILED APPROACHES (do not repeat these):\n{lessons}"
@@ -194,6 +195,7 @@ Return the corrected COMPLETE script (one ```python block, same rules)."""
 
 def do(plan_obj: Plan, state_digest: str, workdir: str, evidence_log: str,
        model: str | None = None) -> dict:
+    session.set_phase("DO")
     model = model or config.MODEL_DO
     steps = "\n".join(f"{s.id}. {s.instruction}" for s in plan_obj.steps)
     user = (
@@ -205,6 +207,7 @@ def do(plan_obj: Plan, state_digest: str, workdir: str, evidence_log: str,
         + "\n\nWrite the script now."
     )
     script_text, _ = llm.call(model, DO_SYSTEM, user)
+    session.record_script("DO", executor.strip_fences(script_text), attempt=1)
     result = executor.execute(script_text, workdir, evidence_log)
     result["attempts"] = 1
     # In-cycle repair: a crashed or empty do-script costs one cheap retry, not a cycle.
@@ -213,6 +216,7 @@ def do(plan_obj: Plan, state_digest: str, workdir: str, evidence_log: str,
         repair = REPAIR_USER.format(script=executor.strip_fences(script_text),
                                     stderr=err[-1500:])
         script_text, _ = llm.call(model, DO_SYSTEM, repair)
+        session.record_script("DO", executor.strip_fences(script_text), attempt=2)
         result = executor.execute(script_text, workdir, evidence_log)
         result["attempts"] = 2
     result["script"] = executor.strip_fences(script_text)
@@ -265,12 +269,14 @@ Reply with a single ```python code block."""
 
 
 def probe(plan_obj: Plan, workdir: str, evidence_log: str) -> dict:
+    session.set_phase("PROBE")
     user = (
         f"OBJECTIVE: {plan_obj.objective}\n\nSUCCESS CRITERIA:\n"
         + "\n".join(f"{i+1}. {c}" for i, c in enumerate(plan_obj.success_criteria))
         + "\n\nWrite the verification script now."
     )
     script_text, _ = llm.call(config.MODEL_CHECK, PROBE_SYSTEM, user)
+    session.record_script("PROBE", executor.strip_fences(script_text))
     result = executor.execute(script_text, workdir, evidence_log)
     result["script"] = executor.strip_fences(script_text)
     return result
@@ -306,6 +312,7 @@ Reply with ONLY a JSON object:
 
 def check(task: str, plan_obj: Plan, evidence: dict, probe_ev: dict,
           workdir: str, pre_gate: list[dict] | None = None) -> tuple[Report, list[dict]]:
+    session.set_phase("CHECK")
     gate = pre_gate if pre_gate is not None else run_gate(plan_obj.verify_commands, workdir)
     user = (
         f"ORIGINAL USER TASK:\n{task}\n\n"
@@ -352,6 +359,7 @@ Reply with ONLY a JSON object:
 
 def act(task: str, report: Report, cycle: int, history_digest: str,
         lessons: str) -> Decision:
+    session.set_phase("ACT")
     user = (
         f"ORIGINAL USER TASK:\n{task}\n\nCYCLE: {cycle}\n\n"
         f"CHECK REPORT:\n{report.model_dump_json(indent=1)}\n\n"
@@ -390,6 +398,7 @@ Reply with ONLY a JSON object: {"verdict": "INFEASIBLE"|"CONTINUE", "reason": st
 
 
 def feasibility_audit(task: str, history_digest: str, last_check: str) -> Feasibility:
+    session.set_phase("AUDIT")
     user = (
         f"TASK:\n{task}\n\nHISTORY (recent cycles):\n{history_digest}\n\n"
         f"LATEST FAILURE CONTEXT:\n{last_check}"

@@ -1,11 +1,16 @@
 """Thin DeepSeek wrapper: one call function, a global token counter,
-and JSON-mode with validate-or-retry-once semantics."""
+and JSON-mode with validate-or-retry-once semantics.
+
+Every HTTP completion is also handed verbatim to the active session log
+(prompt, raw completion, model, tokens, latency) — this is the single
+chokepoint, so nothing the model said is discarded."""
 import json
+import time
 
 from openai import OpenAI
 from pydantic import BaseModel, ValidationError
 
-from pdca import config
+from pdca import config, session
 
 # timeout: a single stalled request must never hang the loop silently.
 _client = OpenAI(api_key=config.DEEPSEEK_API_KEY, base_url=config.BASE_URL,
@@ -19,6 +24,7 @@ def _completion(model: str, system: str, user: str, json_mode: bool) -> tuple[st
     kwargs = {}
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
+    t0 = time.monotonic()
     resp = _client.chat.completions.create(
         model=model,
         messages=[
@@ -28,9 +34,12 @@ def _completion(model: str, system: str, user: str, json_mode: bool) -> tuple[st
         temperature=0.0,
         **kwargs,
     )
+    latency = time.monotonic() - t0
     used = resp.usage.total_tokens if resp.usage else 0
     tokens_used += used
-    return resp.choices[0].message.content or "", used
+    content = resp.choices[0].message.content or ""
+    session.record_call(model, system, user, content, used, latency)
+    return content, used
 
 
 def call(model: str, system: str, user: str, json_mode: bool = False):

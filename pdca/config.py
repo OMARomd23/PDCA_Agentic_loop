@@ -22,3 +22,6 @@ MAX_SECONDS = 1800
 MAX_TOKENS_TOTAL = 400_000
 SCRIPT_TIMEOUT = 120
 STDOUT_CAP = 6000  # chars of Do-script stdout that may enter model context
+
+# Every invocation logs a full session under here (see session.py).
+AGENT_HOME = os.path.expanduser("~/.pdca_agent")
