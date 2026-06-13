@@ -4,6 +4,19 @@ An autonomous coding agent that runs a **Plan → Do → Check → Act** loop on
 
 Give it a task in plain English. It writes code, runs tests, reads failures, fixes them, and keeps going until the task passes every objective gate.
 
+> ### ⚠ Unrestricted mode
+> This build runs with **`UNRESTRICTED = True`** (`pdca/config.py`): the Do/Probe
+> scripts have **no filesystem jail and no command allowlist** — they read, write,
+> and run anywhere the OS permits, including `sudo`. Every run prints
+> `⚠ UNRESTRICTED MODE — full system access` at startup. This is intended for a
+> single operator on their own machine. Set `UNRESTRICTED = False` to re-enable the
+> workdir jail (relative paths confined to the workdir, escapes raise). The
+> operational rails are independent of this flag and always on: per-command
+> timeout, stdout capping, and the harness stopping conditions.
+
+Every invocation also writes a full **session log** under `~/.pdca_agent/sessions/`
+(prompts, completions, scripts, outcome) — see [Session logs](#session-logs).
+
 ---
 
 ## How it works
@@ -83,6 +96,10 @@ PATH=$PWD/.venv/bin:$PATH pdca --help
 
 The `PATH` prefix is required so Do scripts and gate commands can find `pytest`, `ruff`, etc. from the venv.
 
+`pdca "<task>" …` is shorthand for the `run` subcommand — `pdca run "<task>" …` is
+the explicit form (use it if your task text happens to start with `run` or
+`schedule`). The sibling command group is [`schedule`](#scheduling).
+
 ### Single cycle (inspect mode)
 
 Runs one full Plan → Do → Check → Act cycle and prints the check report. Does not loop.
@@ -157,13 +174,15 @@ still pass.
 ```
 pdca_ai/
 ├── pdca/
-│   ├── cli.py        # typer CLI entry point
-│   ├── config.py     # API key, model names, hard-stop defaults
-│   ├── llm.py        # DeepSeek API wrapper (call + call_validated)
+│   ├── cli.py        # typer CLI: `run` + `schedule` group + argv shim (entry)
+│   ├── config.py     # API key, model names, hard-stop defaults, UNRESTRICTED
+│   ├── llm.py        # DeepSeek API wrapper (call + call_validated); logs every call
 │   ├── toolkit.py    # read/write/run/ls/note — injected into Do scripts
 │   ├── executor.py   # subprocess runner for Do scripts + syntax checker
 │   ├── phases.py     # PLAN / DO / CHECK / ACT / PROBE / FEASIBILITY_AUDIT
 │   ├── runner.py     # the while loop, stuck ladder, budgets, BACKSTOP
+│   ├── session.py    # per-run session dir (session.log, raw/, scripts/, meta.json)
+│   ├── scheduler.py  # schedules.json + crontab management (python-crontab)
 │   └── state.py      # STATE.md: appends each cycle, loads last-N digest
 ├── .env              # DEEPSEEK_API_KEY (not committed)
 ├── pyproject.toml
@@ -171,6 +190,12 @@ pdca_ai/
     ├── STATE.md          # per-cycle history (objective, gate, check, act)
     ├── .pdca/            # harness artefacts (scripts, evidence logs)
     └── .pdca_probe/      # probe fixtures (created fresh each cycle)
+
+~/.pdca_agent/            # global agent state (outside the repo)
+├── sessions/             # one dir per invocation — the source of truth (see below)
+├── schedules.json        # stored scheduled jobs
+├── cron/<name>.log       # per-job cron bootstrap logs
+└── work/<name>/          # default workdir for a scheduled job
 ```
 
 ### `STATE.md`
@@ -194,6 +219,55 @@ Act: ADJUST — remove unused import pytest from test_intervals.py
 | `evidence_cycle_N.log` | `note()` calls from the Do script |
 | `probe_N_script.txt` | The verification script the Probe model wrote |
 | `cycle_N_stderr.txt` | stderr from the Do script (if any) |
+
+---
+
+## Session logs
+
+Every invocation (manual **or** scheduled) opens one session directory and routes
+all logging through it, alongside (never replacing) the console output:
+
+```
+~/.pdca_agent/sessions/run_session_<YYYY-MM-DD>_<HH-MM-SS>_<8hex>/
+├── session.log   # timeline: phase entered, model, decision, cycle, timestamps
+├── raw/          # one JSON per model call — exact prompt + raw completion
+│   └── <cycle>_<phase>_<seq>.json   # e.g. 1_PLAN_1.json, 1_DO_2.json (repair)
+├── scripts/      # every Do/Probe script as executed
+│   └── cycle1_DO_attempt1.py, cycle1_PROBE.py, ...
+└── meta.json     # task, workdir, trigger, start/end, outcome, exit_code, tokens, cycles
+```
+
+Each `raw/` file holds `{prompt:{system,user}, completion, model, tokens, latency_s, ...}`
+verbatim for PLAN/DO/CHECK/PROBE/ACT and every retry — nothing the model said is
+discarded. `meta.json`'s `trigger` is `"manual"` for a direct run or
+`"scheduled:<name>"` for a cron-launched one, so the two are easy to tell apart.
+
+---
+
+## Scheduling
+
+The PDCA loop runs to a stop and exits — it is not a daemon. **Scheduling does not
+make the loop recurring.** Each cron wake-up launches a *fresh, complete* `pdca`
+run with a stored prompt: one wake-up = one full session dir.
+
+```bash
+# install a job (idempotent: re-adding the same --name replaces its crontab line)
+pdca schedule add "append the current timestamp to ~/pdca_heartbeat.log" \
+  --every "5m" --name heartbeat            # [--workdir PATH] optional
+
+pdca schedule list                 # name, schedule, prompt, workdir, last run, cron✓/✗
+pdca schedule run heartbeat        # run once now (no waiting for cron) — for testing
+pdca schedule remove heartbeat     # remove the crontab line + the stored job
+```
+
+`--every` accepts shorthand (`5m`, `30m`, `2h`, `hourly`, `daily`, `weekly`) or a
+raw 5-field cron expression. Jobs live in `~/.pdca_agent/schedules.json`; each
+installs **one** crontab line tagged `# pdca:<name>`, so adds never duplicate and
+unrelated crontab lines are never touched. The line uses the absolute venv `pdca`,
+puts the venv on `PATH`, `cd`s into the workdir, and redirects its bootstrap output
+to `~/.pdca_agent/cron/<name>.log` (separate from session logs). Cron calls the
+hidden `pdca _run-scheduled <name>` entrypoint. If `--workdir` is omitted, the job
+defaults to `~/.pdca_agent/work/<name>`.
 
 ---
 
@@ -233,3 +307,4 @@ Typical well-specified tasks: **1–2 cycles, 20–35k tokens**. Stuck tasks bur
 | 1 | STOPPED — proven infeasible |
 | 2 | STOPPED — budget (tokens / time / cycles) |
 | 3 | Environment error — `pytest` or `ruff` not found in PATH |
+| 4 | No such scheduled job (`pdca schedule run`/`_run-scheduled` with unknown name) |
