@@ -102,6 +102,9 @@ def run(task: str, workdir: str, loop: bool, max_cycles: int,
         last_sig, stuck = None, 0
         fail_streak = 0          # backstop: total consecutive overall=fail cycles
         probe_ev: dict | None = None
+        # Last cycle's results, surfaced to notify so the email can report findings.
+        evidence: dict | None = None
+        report = None
 
         while True:
             cycle += 1
@@ -222,6 +225,8 @@ def run(task: str, workdir: str, loop: bool, max_cycles: int,
                     session_id=session.current.id if session.current else "",
                     duration_s=time.monotonic() - start,
                     state_digest=state.load_digest(workdir, 3),
+                    result_output=(evidence or {}).get("stdout", ""),
+                    report_json=report.model_dump_json(indent=1) if report else "",
                 )
             except Exception as e:
                 _emit(f"[NOTIFY] skipped: {e}")
