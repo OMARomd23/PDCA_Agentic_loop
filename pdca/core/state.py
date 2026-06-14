@@ -4,7 +4,7 @@ import os
 import re
 from datetime import datetime
 
-from pdca.phases import Decision, Plan, Report
+from pdca.core.phases import Decision, Plan, Report
 
 STATE_FILE = "STATE.md"
 

@@ -4,7 +4,7 @@ An autonomous coding agent that runs a **Plan → Do → Check → Act** loop on
 
 Give it a task in plain English. It writes code, runs tests, reads failures, fixes them, and keeps going until the task passes every objective gate.
 
-The toolkit works across your whole machine: Do/Probe scripts can read, write, and run commands [anywhere](#working-anywhere-on-the-machine), not just inside the working directory. Every run is recorded to a [session log](#session-logs), and tasks can be [scheduled](#scheduling) to run on a recurring basis.
+The toolkit works across your whole machine: Do/Probe scripts can read, write, and run commands [anywhere](#working-anywhere-on-the-machine), not just inside the working directory. Every run is recorded to a [session log](#session-logs), tasks can be [scheduled](#scheduling) to run on a recurring basis, and a run can email you a [status report](#notifications) when it finishes.
 
 ---
 
@@ -71,7 +71,12 @@ Create `.env` in the repo root:
 
 ```
 DEEPSEEK_API_KEY=sk-...
+RESEND_API_KEY=re_...        # optional — only needed for email notifications
 ```
+
+`RESEND_API_KEY` is optional: it is only read when you opt into email
+[notifications](#notifications). If it is absent, notify simply no-ops — a missing
+key never blocks or fails a run.
 
 Verify the environment:
 
@@ -125,6 +130,8 @@ PATH=$PWD/.venv/bin:$PATH pdca "your task" \
 | `--max-cycles N` | 0 (unlimited) | Hard cycle cap; requires `--loop` to have effect beyond 1 |
 | `--max-tokens N` | 400 000 | Total token budget across all cycles |
 | `--max-seconds N` | 1800 | Wall-time limit in seconds |
+| `--notify` | off | Email a status report when the run finishes (requires `--notify-to`) |
+| `--notify-to EMAIL` | — | Recipient address for `--notify` (required when `--notify` is set) |
 
 ---
 
@@ -163,17 +170,26 @@ still pass.
 ```
 pdca_ai/
 ├── pdca/
-│   ├── cli.py        # typer CLI: `run` + `schedule` group + argv shim (entry)
-│   ├── config.py     # API key, model names, hard-stop defaults, UNRESTRICTED
-│   ├── llm.py        # DeepSeek API wrapper (call + call_validated); logs every call
-│   ├── toolkit.py    # read/write/run/ls/note — injected into Do scripts
-│   ├── executor.py   # subprocess runner for Do scripts + syntax checker
-│   ├── phases.py     # PLAN / DO / CHECK / ACT / PROBE / FEASIBILITY_AUDIT
-│   ├── runner.py     # the while loop, stuck ladder, budgets, BACKSTOP
-│   ├── session.py    # per-run session dir (session.log, raw/, scripts/, meta.json)
-│   ├── scheduler.py  # schedules.json + crontab management (python-crontab)
-│   └── state.py      # STATE.md: appends each cycle, loads last-N digest
-├── .env              # DEEPSEEK_API_KEY (not committed)
+│   ├── cli.py            # typer CLI: `run` + `schedule` group + argv shim (entry)
+│   ├── config.py         # API keys, model names, hard-stop defaults, UNRESTRICTED, notify sender
+│   ├── llm.py            # DeepSeek API wrapper (call + call_validated); logs every call
+│   ├── core/             # the PDCA engine
+│   │   ├── runner.py     # the while loop, stuck ladder, budgets, BACKSTOP
+│   │   ├── phases.py     # PLAN / DO / CHECK / ACT / PROBE / FEASIBILITY_AUDIT
+│   │   ├── session.py    # per-run session dir (session.log, raw/, scripts/, meta.json)
+│   │   └── state.py      # STATE.md: appends each cycle, loads last-N digest
+│   ├── execution/
+│   │   └── executor.py   # subprocess runner for Do scripts + syntax checker
+│   ├── scheduling/
+│   │   └── scheduler.py  # schedules.json + crontab management (python-crontab)
+│   └── tools/            # the tools the agent has access to
+│       ├── toolkit.py    # read/write/run/ls/note — injected into Do scripts
+│       └── notify/       # the ONLY external-notification mechanism (Resend email)
+│           ├── notify.py    # orchestration: build facts → compose → render → send
+│           ├── composer.py  # LLM writes the subject + summary
+│           ├── template.py  # HTML template + code-filled deterministic facts
+│           └── sender.py    # Resend delivery wrapper (api key from env/config)
+├── .env                  # DEEPSEEK_API_KEY, optional RESEND_API_KEY (not committed)
 ├── pyproject.toml
 └── work_*/           # one directory per task run
     ├── STATE.md          # per-cycle history (objective, gate, check, act)
@@ -264,6 +280,59 @@ ls  "$SESS/raw"                # every prompt + completion, one file per call
 
 ---
 
+## Notifications
+
+`tools/notify/` is the agent's **only** external-notification channel. When enabled,
+it sends a single status email when a run finishes — manual or scheduled. It is
+**opt-in** and off by default: nothing leaves your machine unless you ask for it.
+
+Enable it per run with two flags — `--notify` to turn it on and `--notify-to` for
+the recipient (required):
+
+```bash
+PATH=$PWD/.venv/bin:$PATH pdca "your task" \
+  --workdir ./work_myfeature --loop \
+  --notify --notify-to you@example.com
+```
+
+`--notify` without `--notify-to` is rejected before any work starts (exit 2).
+
+### What you get
+
+The email reports the run's outcome with deterministic facts filled by the harness
+(never the model): outcome, exit code, cycles, tokens, duration, trigger, workdir,
+and session id. Only the **subject** and a short 2–4 sentence **summary** are written
+by the model (`deepseek-v4-flash`), with a deterministic fallback so the email still
+sends if composition fails. The model never sees or pastes raw logs.
+
+Notification is non-fatal by design: any delivery error is logged to the session log
+and swallowed, so it can **never** change a run's exit code.
+
+### Backend & configuration
+
+Delivery uses [Resend](https://resend.com). The API key is read from the
+environment / `.env` (`RESEND_API_KEY`) and is never hardcoded. Two settings control
+the sender (recipient is always supplied per run via `--notify-to`):
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `RESEND_API_KEY` | — | Resend API key; if unset, notify no-ops |
+| `PDCA_NOTIFY_FROM` | `agent_pdca@resend.dev` | Sender identity (Resend's shared, pre-verified test domain) |
+
+### Scheduled runs
+
+`pdca schedule add` takes the same `--notify` / `--notify-to` flags; the recipient is
+stored per job, and each cron wake-up emails it when that run finishes. Jobs added
+without `--notify` stay silent. `schedule list` shows each job's `notify:` recipient
+(or `off`).
+
+```bash
+pdca schedule add "<your task>" --every "daily" --name nightly-build \
+  --notify --notify-to you@example.com
+```
+
+---
+
 ## Scheduling
 
 The PDCA loop runs to a stop and exits — it is not a daemon. **Scheduling does not
@@ -280,8 +349,44 @@ pdca schedule run heartbeat        # run once now (no waiting for cron) — for 
 pdca schedule remove heartbeat     # remove the crontab line + the stored job
 ```
 
-`--every` accepts shorthand (`5m`, `30m`, `2h`, `hourly`, `daily`, `weekly`) or a
-raw 5-field cron expression. Jobs live in `~/.pdca_agent/schedules.json`; each
+### Choosing a schedule
+
+`--every` takes a shorthand or a raw 5-field cron expression:
+
+| `--every` | Runs | Cron equivalent |
+|---|---|---|
+| `5m` | every 5 minutes | `*/5 * * * *` |
+| `15m` | every 15 minutes | `*/15 * * * *` |
+| `30m` | every 30 minutes | `*/30 * * * *` |
+| `2h` | every 2 hours | `0 */2 * * *` |
+| `hourly` | top of every hour | `0 * * * *` |
+| `daily` | every day at midnight | `0 0 * * *` |
+| `weekly` | every Sunday at midnight | `0 0 * * 0` |
+| `monthly` | the 1st of each month, midnight | `0 0 1 * *` |
+| `"0 9 * * *"` | every day at 09:00 | *(raw cron)* |
+| `"30 18 * * 5"` | every Friday at 18:30 | *(raw cron)* |
+
+`Nm` accepts 1–59 and `Nh` accepts 1–23; for a specific time of day or weekday,
+pass a raw cron expression (`minute hour day-of-month month day-of-week`).
+
+```bash
+# every 10 minutes
+pdca schedule add "<your task>" --every "10m" --name watcher
+
+# every hour, on the hour
+pdca schedule add "<your task>" --every "hourly" --name hourly-sync
+
+# every day (at midnight)
+pdca schedule add "<your task>" --every "daily" --name nightly-build
+
+# every day at 9:00am  (raw cron — finer control than the shorthands)
+pdca schedule add "<your task>" --every "0 9 * * *" --name morning-report
+
+# every Monday at 8:00am
+pdca schedule add "<your task>" --every "0 8 * * 1" --name weekly-digest
+```
+
+Jobs live in `~/.pdca_agent/schedules.json`; each
 installs **one** crontab line tagged `# pdca:<name>`, so adds never duplicate and
 unrelated crontab lines are never touched. The line uses the absolute venv `pdca`,
 puts the venv on `PATH`, `cd`s into the workdir, and redirects its bootstrap output

@@ -34,3 +34,13 @@ UNRESTRICTED = True
 
 # Every invocation logs a full session under here (see session.py).
 AGENT_HOME = os.path.expanduser("~/.pdca_agent")
+
+# ---- Notifications (tools/notify) -------------------------------------
+# Resend is the email delivery backend. The API key is read from the env /.env
+# (never hardcoded); if it is absent, the notify tool simply no-ops — a missing
+# key must never block or fail a run.
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+# Sender identity: Resend's shared, pre-verified test domain (not a personal
+# address). Notifications are OFF by default and opt-in per run via
+# `--notify --notify-to <email>`; the recipient is supplied there, never here.
+NOTIFY_FROM = os.environ.get("PDCA_NOTIFY_FROM", "agent_pdca@resend.dev")

@@ -10,7 +10,8 @@ import time
 from openai import OpenAI
 from pydantic import BaseModel, ValidationError
 
-from pdca import config, session
+from pdca import config
+from pdca.core import session
 
 # timeout: a single stalled request must never hang the loop silently.
 _client = OpenAI(api_key=config.DEEPSEEK_API_KEY, base_url=config.BASE_URL,

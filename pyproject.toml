@@ -9,6 +9,7 @@ dependencies = [
     "typer>=0.12",
     "python-dotenv>=1.0",
     "python-crontab>=3.0",
+    "resend>=2.0",
 ]
 
 [project.scripts]
@@ -18,5 +19,5 @@ pdca = "pdca.cli:entry"
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = ["pdca"]
+[tool.setuptools.packages.find]
+include = ["pdca*"]

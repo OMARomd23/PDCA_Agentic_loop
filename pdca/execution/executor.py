@@ -12,7 +12,8 @@ import time
 
 from pdca import config
 
-_TOOLKIT_DIR = os.path.dirname(os.path.abspath(__file__))
+_TOOLKIT_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools")
 _PRELUDE = "from toolkit import read, write, run, ls, note\n"
 
 

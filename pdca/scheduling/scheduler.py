@@ -125,7 +125,8 @@ def _cron_installed(name: str) -> bool:
 
 # ---- public API -------------------------------------------------------
 
-def add(name: str, prompt: str, every: str, workdir: str | None) -> dict:
+def add(name: str, prompt: str, every: str, workdir: str | None,
+        notify_to: str | None = None) -> dict:
     if not _NAME_RE.match(name):
         raise ValueError(f"invalid name {name!r}; use letters, digits, '-' and '_' only")
     cron_expr = to_cron(every)
@@ -141,6 +142,7 @@ def add(name: str, prompt: str, every: str, workdir: str | None) -> dict:
         "every": every,
         "cron": cron_expr,
         "workdir": workdir,
+        "notify_to": notify_to or None,   # opt-in: email a status report when each run finishes
         "created": existing.get("created", datetime.now().isoformat(timespec="seconds")),
         "last_run": existing.get("last_run"),
     }
@@ -182,9 +184,11 @@ def run_once(name: str) -> int:
     jobs[name] = job
     _save(jobs)
 
-    from pdca import runner  # deferred: importing it builds the LLM client
+    notify_to = job.get("notify_to") or ""
+    from pdca.core import runner  # deferred: importing it builds the LLM client
     return runner.run(
         job["prompt"], job["workdir"], loop=True, max_cycles=0,
         max_seconds=config.MAX_SECONDS, max_tokens=config.MAX_TOKENS_TOTAL,
         trigger=f"scheduled:{name}",
+        notify=bool(notify_to), notify_to=notify_to,
     )

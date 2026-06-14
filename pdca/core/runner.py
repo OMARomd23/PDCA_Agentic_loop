@@ -10,7 +10,8 @@ Giving up is a harness decision, never a model one:
 import os
 import time
 
-from pdca import config, llm, phases, session, state
+from pdca import config, llm
+from pdca.core import phases, session, state
 
 
 def _emit(msg: str) -> None:
@@ -69,7 +70,8 @@ def _failure_pack(report_json: str, gate: list[dict], evidence: dict,
 
 
 def run(task: str, workdir: str, loop: bool, max_cycles: int,
-        max_seconds: int, max_tokens: int, trigger: str = "manual") -> int:
+        max_seconds: int, max_tokens: int, trigger: str = "manual",
+        notify: bool = False, notify_to: str = "") -> int:
     """Exit codes: 0 ADOPT / single-cycle done, 1 proven infeasible,
     2 budget stop (tokens/time/cycles), 3 environment error.
 
@@ -204,6 +206,26 @@ def run(task: str, workdir: str, loop: bool, max_cycles: int,
                 fail_streak = 0  # reset backstop; audit already reviewed the history
 
         _emit(f"\n{cycle} cycle(s) | {outcome} | {llm.tokens_used} tokens total")
+
+        # End-of-run notification — the agent's only external channel. Opt-in:
+        # only fires when the caller enabled it and gave a recipient. Deferred
+        # import keeps Resend/compose cost off paths that never send; the tool
+        # swallows its own errors so this can never change the exit code.
+        if notify and notify_to:
+            try:
+                from pdca.tools import notify as notify_tool
+                notify_tool.notify_run_complete(
+                    recipient=notify_to,
+                    task=task, workdir=workdir, trigger=trigger,
+                    outcome=outcome, exit_code=exit_code, cycles=cycle,
+                    tokens=llm.tokens_used,
+                    session_id=session.current.id if session.current else "",
+                    duration_s=time.monotonic() - start,
+                    state_digest=state.load_digest(workdir, 3),
+                )
+            except Exception as e:
+                _emit(f"[NOTIFY] skipped: {e}")
+
         return exit_code
     finally:
         session.close(outcome, exit_code, cycle, llm.tokens_used)

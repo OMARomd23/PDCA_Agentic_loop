@@ -14,8 +14,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from pdca import config, executor, llm, session
-from pdca.toolkit import TOOLKIT_DOCS
+from pdca import config, llm
+from pdca.core import session
+from pdca.execution import executor
+from pdca.tools.toolkit import TOOLKIT_DOCS
 
 
 class Step(BaseModel):
