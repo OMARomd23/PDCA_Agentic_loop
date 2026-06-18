@@ -21,7 +21,15 @@ MAX_CYCLES = 6
 MAX_SECONDS = 1800
 MAX_TOKENS_TOTAL = 400_000
 SCRIPT_TIMEOUT = 120
-STDOUT_CAP = 6000  # chars of Do-script stdout that may enter model context
+STDOUT_CAP = 6000  # chars of an agent's transcript/evidence that may enter model context
+
+# Turn-based execution agents (DO / PROBE): the agent acts one turn at a time
+# (read/write/run/ls/note) and calls finish() when done. These cap how long it may
+# loop before the harness forces a handoff, and how much any single tool result may
+# return into context. Per-command shell timeout stays SCRIPT_TIMEOUT.
+MAX_DO_TURNS = 25
+MAX_PROBE_TURNS = 15
+TOOL_OUTPUT_CAP = 4000  # chars any single tool result may return to the agent
 
 # Unrestricted execution. When True there is NO filesystem jail and NO command
 # allowlist: toolkit read/write/run/ls operate anywhere the OS permits, and run()

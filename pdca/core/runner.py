@@ -22,6 +22,7 @@ def _emit(msg: str) -> None:
 RETHINK_AFTER = 3      # consecutive same-signature failures before forced rethink
 AUDIT_AFTER = 5        # consecutive same-signature failures before feasibility audit
 BACKSTOP_AUDIT = 8     # any 8 consecutive overall=fail cycles triggers audit regardless
+QUALITY_STALL_AFTER = 2  # cycles with no gain in quality-criteria-met before a consolidation rethink
 
 # Directories created by the harness that must never appear in task lint/test gates.
 _HARNESS_DIRS = (".pdca", ".pdca_probe")
@@ -77,7 +78,9 @@ def run(task: str, workdir: str, loop: bool, max_cycles: int,
 
     `trigger` ("manual" or "scheduled:<name>") is recorded in the session's
     meta.json so manual and cron-launched runs can be told apart."""
-    workdir = os.path.realpath(workdir)
+    # expanduser first: realpath/abspath do NOT expand a leading '~', they would
+    # create a literal "~" directory. Result is always an absolute path the model sees.
+    workdir = os.path.realpath(os.path.expanduser(workdir))
     session.start(task, workdir, trigger=trigger)
     if config.UNRESTRICTED:
         _emit("⚠ UNRESTRICTED MODE — full system access")
@@ -101,6 +104,9 @@ def run(task: str, workdir: str, loop: bool, max_cycles: int,
         lessons: list[str] = []
         last_sig, stuck = None, 0
         fail_streak = 0          # backstop: total consecutive overall=fail cycles
+        q_stall = 0              # cycles since quality-met count last improved
+        best_qmet = -1           # highest quality-criteria-met count seen so far
+        best_evidence: dict | None = None  # DO result from the best cycle (carried forward)
         probe_ev: dict | None = None
         # Last cycle's results, surfaced to notify so the email can report findings.
         evidence: dict | None = None
@@ -125,46 +131,69 @@ def run(task: str, workdir: str, loop: bool, max_cycles: int,
             digest = state.load_digest(workdir)
             lessons_text = "\n".join(f"- {x}" for x in lessons[-15:])
             rethink = stuck >= RETHINK_AFTER
+            quality_stalled = q_stall >= QUALITY_STALL_AFTER
+            if quality_stalled:
+                q_stall = 0  # consume the signal; give the new approach room before re-firing
+            escalate = rethink or quality_stalled  # either routes DO to the pro model
 
             plan = phases.plan(task, digest, last_check_pack, lessons_text,
-                               rethink_count=stuck if rethink else 0)
-            _emit(f"[PLAN]  {len(plan.steps)} steps, {len(plan.success_criteria)} criteria, "
-                  f"{len(plan.verify_commands)} verify cmds"
-                  + (" [RETHINK]" if rethink else "") + f" — {plan.objective}")
+                               rethink_count=stuck if rethink else 0,
+                               quality_stalled=quality_stalled)
+            _emit(f"[PLAN]  ({plan.task_type}) {len(plan.steps)} steps, "
+                  f"{len(plan.success_criteria)} criteria, {len(plan.verify_commands)} verify cmds, "
+                  f"{len(plan.quality_criteria)} quality"
+                  + (" [RETHINK]" if rethink else "")
+                  + (" [QUALITY-STALL]" if quality_stalled else "") + f" — {plan.objective}")
 
-            do_model = config.MODEL_PLAN if rethink else config.MODEL_DO
+            do_model = config.MODEL_PLAN if escalate else config.MODEL_DO
             ev_log = os.path.join(pdca_dir, f"evidence_cycle_{cycle}.log")
-            evidence = phases.do(plan, digest, workdir, ev_log, model=do_model)
-            with open(os.path.join(pdca_dir, f"cycle_{cycle}_script.txt"), "w") as f:
-                f.write(evidence["script"])
+            # Carry the BEST cycle's finish-summary forward (not just the last one) so DO
+            # builds on the highest-quality work and a regressing cycle can't lose ground.
+            # The workdir itself persists, so DO re-inspects the real files each cycle.
+            prior_summary = best_evidence["summary"] if best_evidence else ""
+            prev_stderr = best_evidence["stderr"] if best_evidence else ""
+            evidence = phases.do(plan, digest, workdir, ev_log, model=do_model,
+                                 task=task, prior_summary=prior_summary, prev_stderr=prev_stderr)
+            with open(os.path.join(pdca_dir, f"cycle_{cycle}_transcript.txt"), "w") as f:
+                f.write(evidence["transcript"])
             if evidence["stderr"]:
                 with open(os.path.join(pdca_dir, f"cycle_{cycle}_stderr.txt"), "w") as f:
                     f.write(evidence["stderr"])
-            _emit(f"[DO]    script ran {evidence['elapsed']}s, "
-                  f"{'ok' if evidence['ok'] else 'FAILED'}"
-                  + (f" ({evidence['attempts']} attempts)" if evidence["attempts"] > 1 else "")
+            _emit(f"[DO]    {evidence['turns']} turns in {evidence['elapsed']}s, "
+                  f"{'finished' if evidence['ok'] else 'HANDED OFF (turn cap)'}"
                   + (" [pro]" if do_model == config.MODEL_PLAN else ""))
 
-            # Probe is only useful when gate commands pass (catching subtle issues near done).
-            # Skip it when gates obviously fail — saves a pro-model call and avoids noise.
+            # Objective gate (authoritative floor) once, then CHECK every cycle on DO's
+            # evidence. CHECK decides on demand whether an independent PROBE is needed;
+            # if so we run it and re-check with its findings. PROBE never lets DO opt out
+            # of its own audit — the auditor (CHECK), not the executor, calls for it.
             quick_gate = phases.run_gate(plan.verify_commands, workdir)
-            gate_passed = all(g["code"] == 0 for g in quick_gate)
-            if gate_passed:
+            report, gate = phases.check(task, plan, evidence, workdir, pre_gate=quick_gate)
+            probe_ev = None
+            if report.request_probe:
                 probe_log = os.path.join(pdca_dir, f"probe_cycle_{cycle}.log")
-                probe_ev = phases.probe(plan, workdir, probe_log)
-                with open(os.path.join(pdca_dir, f"probe_{cycle}_script.txt"), "w") as f:
-                    f.write(probe_ev["script"])
-                _emit(f"[PROBE] ran {probe_ev['elapsed']}s, "
-                      f"{'ok' if probe_ev['ok'] else 'FAILED'}")
+                probe_ev = phases.probe(plan, workdir, probe_log,
+                                        probe_reason=report.probe_reason)
+                with open(os.path.join(pdca_dir, f"probe_{cycle}_transcript.txt"), "w") as f:
+                    f.write(probe_ev["transcript"])
+                _emit(f"[PROBE] requested ({report.probe_reason[:80]}) — "
+                      f"{probe_ev['turns']} turns in {probe_ev['elapsed']}s")
+                report, gate = phases.check(task, plan, evidence, workdir,
+                                            probe_ev=probe_ev, pre_gate=quick_gate)
             else:
-                probe_ev = {"ok": True, "stdout": "(skipped: gate failed)", "stderr": "", "notes": ""}
-                _emit("[PROBE] skipped (gate failed)")
-
-            report, gate = phases.check(task, plan, evidence, probe_ev, workdir,
-                                        pre_gate=quick_gate)
+                _emit("[PROBE] not requested by CHECK")
             met = sum(1 for c in report.criteria if c.status == "met")
-            _emit(f"[CHECK] {met}/{len(report.criteria)} criteria met, overall={report.overall}")
+            qmet = sum(1 for q in report.quality if q.status == "met")
+            _emit(f"[CHECK] {met}/{len(report.criteria)} criteria met, "
+                  f"quality {qmet}/{len(report.quality)} met, overall={report.overall}")
             report_json = report.model_dump_json(indent=1)
+
+            # Track quality progress: a new high-water mark resets the stall counter
+            # and becomes the artifact carried forward; otherwise the loop is stalling.
+            if qmet > best_qmet:
+                best_qmet, best_evidence, q_stall = qmet, evidence, 0
+            else:
+                q_stall += 1
 
             decision = phases.act(task, report, cycle, digest, lessons_text)
             _emit(f"[ACT]   {decision.decision}: {decision.reason}")
@@ -184,8 +213,8 @@ def run(task: str, workdir: str, loop: bool, max_cycles: int,
             for adj in decision.adjustments:
                 if adj not in lessons:
                     lessons.append(adj)
-            lessons.append(f"cycle {cycle} ({'rethink' if rethink else 'normal'}): "
-                           f"failed — {decision.reason}")
+            mode = "rethink" if rethink else "quality-stall" if quality_stalled else "normal"
+            lessons.append(f"cycle {cycle} ({mode}): failed — {decision.reason}")
 
             fail_streak += 1
             sig = _failure_signature(gate, report)

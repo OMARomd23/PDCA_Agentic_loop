@@ -1,108 +1,68 @@
-"""The 'standard library' injected into model-written Do scripts.
+"""Prompt-text source of truth for the turn-based DO/PROBE agents.
 
-Standalone on purpose: imported by the executor's subprocess as a top-level
-module, so it must not import anything from the pdca package. Workdir and
-evidence-log locations arrive via environment variables set by the executor.
+The tools themselves live in `pdca.execution.executor.ToolContext` (run in-process
+by the agent loop). This module holds only what the model is told: the tool
+reference, the neutral guidance on programmatic tool-calling, and the per-turn
+action protocol the loop parses.
 """
-import os
-import subprocess
-import sys
 
-_WORKDIR_ENV = os.environ.get("PDCA_WORKDIR", "")
-_WORKDIR = os.path.realpath(_WORKDIR_ENV) if _WORKDIR_ENV else os.path.abspath(".")
-_EVIDENCE_LOG = os.environ.get("PDCA_EVIDENCE_LOG", "")
-# Set by the executor from config.UNRESTRICTED. Default "1" (no jail) so the
-# tools fail open to full access; the executor always sets it explicitly.
-_UNRESTRICTED = os.environ.get("PDCA_UNRESTRICTED", "1") == "1"
-
-
-def _resolve(path: str) -> str:
-    """Map a tool path to an absolute path. Relative paths resolve against the
-    working directory; absolute paths are honored as-is. In UNRESTRICTED mode
-    (the default) there is no workdir jail; when disabled, escapes raise."""
-    full = os.path.realpath(os.path.join(_WORKDIR, path))
-    if not _UNRESTRICTED and full != _WORKDIR and not full.startswith(_WORKDIR + os.sep):
-        raise ValueError(f"path escapes workdir: {path}")
-    return full
-
-
-def read(path: str) -> str:
-    with open(_resolve(path), "r", encoding="utf-8", errors="replace") as f:
-        return f.read()
-
-
-def write(path: str, content: str) -> str:
-    full = _resolve(path)
-    os.makedirs(os.path.dirname(full) or full, exist_ok=True)
-    with open(full, "w", encoding="utf-8") as f:
-        f.write(content)
-    msg = f"wrote {len(content)} chars to {path}"
-    if full.endswith(".py"):
-        chk = subprocess.run([sys.executable, "-m", "py_compile", full],
-                             capture_output=True, text=True)
-        if chk.returncode != 0:
-            err = chk.stderr.strip()[-400:]
-            msg += f" [SYNTAX ERROR: {err}]"
-            note(f"SYNTAX ERROR in {path}: {err}")
-        else:
-            msg += " [syntax OK]"
-    return msg
-
-
-def run(cmd: str, timeout: int = 60) -> dict:
-    try:
-        p = subprocess.run(
-            cmd, shell=True, cwd=_WORKDIR, capture_output=True,
-            text=True, timeout=timeout,
-        )
-        return {"code": p.returncode, "out": p.stdout, "err": p.stderr}
-    except subprocess.TimeoutExpired:
-        return {"code": -1, "out": "", "err": f"timeout after {timeout}s"}
-
-
-def ls(path: str = ".") -> list:
-    return sorted(os.listdir(_resolve(path)))
-
-
-def note(text: str) -> None:
-    if _EVIDENCE_LOG:
-        with open(_EVIDENCE_LOG, "a", encoding="utf-8") as f:
-            f.write(str(text).rstrip("\n") + "\n")
-
-
-# Pasted verbatim into the Do prompt — the model's ONLY API reference.
+# Pasted into the DO/PROBE system prompts — the model's ONLY API reference.
 TOOLKIT_DOCS = '''\
-Available functions (already imported, do NOT import anything else for them):
+Tools you can call (one or more per turn):
 
   read(path) -> str
-      Return a file's full text. Path is relative to the working directory.
-      e.g. src = read("app/utils.py")
+      Return a file's full text. Relative paths resolve against the working
+      directory. e.g. {"tool": "read", "args": {"path": "app/utils.py"}}
 
   write(path, content) -> str
-      Overwrite (or create) a file with content; creates parent dirs.
-      For .py files the return value includes a syntax-check verdict
-      ("[syntax OK]" or "[SYNTAX ERROR: ...]") — ALWAYS print it and stop
-      relying on a file you just wrote if its syntax check failed.
-      e.g. print(write("app/utils.py", fixed_source))
+      Overwrite (or create) a file with content; creates parent dirs. For .py
+      files the result includes a syntax-check verdict ("[syntax OK]" or
+      "[SYNTAX ERROR: ...]") — read it and re-write if it failed.
+      e.g. {"tool": "write", "args": {"path": "app/utils.py", "content": "..."}}
 
-  run(cmd, timeout=60) -> dict with keys "code", "out", "err"
-      Run a shell command. Any command is permitted, including sudo and commands
-      that touch paths outside the working directory. The command's working
-      directory is the task working directory; use absolute paths to act
-      elsewhere. The timeout is a hard cap (the command is killed if exceeded).
-      e.g. r = run("pytest -q"); print("exit:", r["code"], r["err"][-300:])
+  run(cmd, timeout=120) -> str
+      Run a shell command and return "exit <code>" plus its output tail. ANY
+      command is permitted (including sudo and paths outside the workdir). The
+      command runs in the task working directory; the workdir virtualenv is on
+      PATH, so call `python`/`pip`/`pytest` directly (never `source`, never
+      `./venv/bin/python`). e.g. {"tool": "run", "args": {"cmd": "pytest -q"}}
 
-  ls(path=".") -> list[str]
-      List directory entries.
-      e.g. print(ls("tests"))
+  ls(path=".") -> str
+      List directory entries. e.g. {"tool": "ls", "args": {"path": "tests"}}
 
-  note(text) -> None
-      Append a line to the cycle's evidence log (recorded findings that do
-      not count against the stdout cap).
-      e.g. note("bug found: off-by-one in slice at utils.py line 14")
+  note(text) -> str
+      Append a line to the cycle's evidence log (findings that survive even if
+      they scroll out of your turn-by-turn context).
 
-Paths: relative paths resolve against the working directory; absolute paths
-(e.g. "/tmp/out.txt", "/home/you/notes.md") are honored as given. UNRESTRICTED
-MODE is active: read/write/run/ls may operate anywhere on the filesystem the OS
-permits, including via sudo. There is no workdir jail — act deliberately.
+  finish(summary) -> str
+      Call this — and ONLY this — when the work is genuinely complete. `summary`
+      is a short account of what you did and the state you are leaving behind; it
+      is carried into the next cycle. Calling finish ends your turn budget.
+
+Programmatic tool-calling is an OPTION, not a requirement. When a subtask is
+repetitive, bulk, or computational (transform many records, generate dozens of
+similar entries, crunch data, run a suite), it is usually best to `write` a small
+script — in whatever language fits (python, bash, ...) — and `run` it. When you
+are authoring a handful of distinct files or making targeted edits, just `write`
+each one directly. Reason about the subtask in front of you and pick whichever is
+actually practical; neither approach is mandated and neither is forbidden.
+
+Paths: relative paths resolve against the working directory; absolute paths are
+honored as given. UNRESTRICTED MODE is active — there is no workdir jail; act
+deliberately.
+'''
+
+# How every turn must be formatted; parsed by llm.agent_loop.
+AGENT_PROTOCOL = '''\
+You act in a loop, one turn at a time. Each turn, reply with ONLY a JSON object:
+
+  {"thought": "<one or two sentences of reasoning>",
+   "calls": [{"tool": "<name>", "args": {<arguments>}}, ...]}
+
+- Issue one or more tool calls per turn (they run in order; their results come
+  back to you on the next turn). Start by inspecting the working directory before
+  changing anything.
+- Do real work across as many turns as you need. When — and only when — the task
+  is genuinely done, make a single call to "finish" with a summary.
+- Reply with the JSON object and nothing else (no prose, no code fences).
 '''

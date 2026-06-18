@@ -19,18 +19,21 @@ def append_cycle(workdir: str, cycle: int, plan: Plan, evidence: dict,
     if evidence["stderr"]:
         stdout_digest += "\n[stderr tail] " + evidence["stderr"][-300:].replace("\n", " | ")
     verdicts = "; ".join(f"{c.status}: {c.text}" for c in report.criteria)
+    quality = "; ".join(f"{q.status}: {q.text}" for q in report.quality) or "(none)"
     gate_line = "; ".join(f"`{g['cmd']}` -> {g['code']}" for g in gate) or "(no verify commands)"
     block = f"""
 ## Cycle {cycle} — {datetime.now().isoformat(timespec='seconds')}
 **Objective:** {plan.objective}
 **Strategy:** {plan.strategy}
 **Criteria:** {'; '.join(plan.success_criteria)}
+**Quality bar:** {'; '.join(q.text for q in plan.quality_criteria)}
 **Evidence digest:**
 ```
 {stdout_digest}
 ```
 **Gate:** {gate_line}
 **Check:** overall={report.overall} | {verdicts}
+**Quality:** {quality}
 **Act:** {decision.decision} — {decision.reason}
 **Adjustments/lessons:** {'; '.join(decision.adjustments) or '(none)'}
 """

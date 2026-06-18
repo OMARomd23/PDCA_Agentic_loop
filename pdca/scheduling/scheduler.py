@@ -130,7 +130,7 @@ def add(name: str, prompt: str, every: str, workdir: str | None,
     if not _NAME_RE.match(name):
         raise ValueError(f"invalid name {name!r}; use letters, digits, '-' and '_' only")
     cron_expr = to_cron(every)
-    workdir = os.path.abspath(workdir) if workdir else os.path.join(DEFAULT_WORK_ROOT, name)
+    workdir = os.path.abspath(os.path.expanduser(workdir)) if workdir else os.path.join(DEFAULT_WORK_ROOT, name)
     os.makedirs(CRON_LOG_DIR, exist_ok=True)
     os.makedirs(workdir, exist_ok=True)
 
